@@ -136,6 +136,13 @@ jobs:
               ($valid | split("\n") | index($k))
             )]' 2>/dev/null || true)
 
+          echo "Model returned $(printf '%s' "$REVIEW_JSON" | jq '.comments | length' 2>/dev/null || echo 'n/a') comment(s); $(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 'n/a') after diff filtering."
+          if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
+            echo "Model output (first 400 chars):"
+            printf '%s' "$REVIEW_JSON" | head -c 400
+            echo ""
+          fi
+
           if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
             BODY=$(jq -n \
               --arg commit_id "$(git rev-parse HEAD)" \
