@@ -21,8 +21,10 @@ jobs:
     continue-on-error: true
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # Free models on OpenRouter change over time; swap this slug if it stops working.
-      MODEL: meta-llama/llama-4-maverick:free
+      # openrouter/free auto-routes to the best available free model, so it
+      # keeps working as free models come and go. Pin a specific slug (e.g.
+      # google/gemma-4-31b-it:free) if you want consistent model quality.
+      MODEL: openrouter/free
       MAX_DIFF_CHARS: 30000
 
     steps:
