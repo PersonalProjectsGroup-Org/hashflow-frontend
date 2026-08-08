@@ -1,0 +1,98 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel a running review if new commits are pushed to the PR.
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Reviews are informational: never turn the PR red if the API hiccups.
+    continue-on-error: true
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Free models on OpenRouter change over time; swap this slug if it stops working.
+      MODEL: meta-llama/llama-4-maverick:free
+      MAX_DIFF_CHARS: 30000
+
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Warn when API key is missing
+        if: env.OPENROUTER_API_KEY == ''
+        run: echo "::warning::OPENROUTER_API_KEY secret is not set — AI review skipped. Add it in Settings → Secrets and variables → Actions."
+
+      - name: Run AI review
+        if: env.OPENROUTER_API_KEY != ''
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+
+          # Compute the PR diff (changes on the head branch since it diverged from base).
+          git diff "$BASE"...HEAD > /tmp/pr.diff || true
+
+          if [ ! -s /tmp/pr.diff ]; then
+            gh pr comment "$PR_NUMBER" --body "🤖 AI review: no code changes to review in this PR."
+            exit 0
+          fi
+
+          # Keep very large diffs within the model's context window.
+          if [ "$(wc -c < /tmp/pr.diff)" -gt "$MAX_DIFF_CHARS" ]; then
+            head -c "$MAX_DIFF_CHARS" /tmp/pr.diff > /tmp/pr.truncated.diff
+            mv /tmp/pr.truncated.diff /tmp/pr.diff
+          fi
+
+          RESPONSE=$(curl -sS https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg model "$MODEL" \
+              --rawfile diff /tmp/pr.diff \
+              '{
+                model: $model,
+                temperature: 0.2,
+                messages: [
+                  {
+                    role: "system",
+                    content: "You are a senior code reviewer for a React + TypeScript (Vite) frontend project. Review the pull request diff. Be concise and concrete. Flag real issues only — avoid nitpicks and false positives. Reply in the language of the PR description if it is not English."
+                  },
+                  {
+                    role: "user",
+                    content: "Review this pull request diff. Structure your reply as:\n1. Summary (2-3 sentences: what the PR does and overall impression)\n2. Issues, each as a bullet: [SEVERITY: ERROR/WARNING/SUGGESTION] file:line — description and suggested fix\nFocus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n\nDiff (truncated to the first part if very large):\n" + $diff
+                  }
+                ]
+              }')" || true)
+
+          COMMENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+          if [ -z "$COMMENT" ]; then
+            ERROR=$(printf '%s' "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
+            [ -z "$ERROR" ] && ERROR="OpenRouter request failed (check the Actions log for details)"
+            echo "::warning::OpenRouter review failed: $ERROR"
+            gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: $ERROR" || true
+            exit 0
+          fi
+
+          BODY=$(cat <<EOF
+          ## 🤖 AI Code Review
+          Model: \`$MODEL\`
+
+          $COMMENT
+          EOF
+          )
+          gh pr comment "$PR_NUMBER" --body "$BODY"
