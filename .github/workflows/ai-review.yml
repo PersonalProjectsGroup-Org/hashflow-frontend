@@ -83,7 +83,7 @@ jobs:
                   },
                   {
                     role: "user",
-                    content: ("Review this pull request diff. Respond with ONLY a JSON object — no markdown fences, no extra text. Shape:\n{\"summary\": \"2-3 sentence overview of what the PR does and your overall impression\", \"comments\": [{\"path\": \"path/to/file.ts\", \"line\": 42, \"severity\": \"ERROR|WARNING|SUGGESTION\", \"message\": \"short description and suggested fix\"}]}\n\nRules:\n- \"path\" must match the diff exactly; \"line\" must be the line number in the NEW version of the file and must be a line added by this PR.\n- Flag only real issues, at most 10 comments. Focus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n- If there are no issues, return {\"summary\": \"...\", \"comments\": []}.\n\nDiff (truncated to the first part if very large):\n" + $diff)
+                    content: ("Review this pull request diff. Respond with ONLY a JSON object — no markdown fences, no extra text. Shape:\n{\"summary\": \"2-3 sentence overview of what the PR does and your overall impression\", \"comments\": [{\"path\": \"path/to/file.ts\", \"line\": 42, \"severity\": \"ERROR|WARNING|SUGGESTION\", \"message\": \"short description and suggested fix\", \"suggestion\": \"optional replacement code for that one line\"}]}\n\nRules:\n- \"path\" must match the diff exactly; \"line\" must be the line number in the NEW version of the file and must be a line added by this PR.\n- \"suggestion\" is optional: for issues with a clear mechanical fix, include the full replacement for the flagged line only, with the same indentation as the original line. Never wrap it in markdown fences.\n- Flag only real issues, at most 10 comments. Focus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n- If there are no issues, return {\"summary\": \"...\", \"comments\": []}.\n\nDiff (truncated to the first part if very large):\n" + $diff)
                   }
                 ]
               }')
@@ -134,7 +134,16 @@ jobs:
             [.comments[]? | select(
               ((.path // "") + "\t" + ((.line // -1) | tostring)) as $k |
               ($valid | split("\n") | index($k))
-            )]' 2>/dev/null || true)
+            ) | {
+              path: .path,
+              line: .line,
+              body: (
+                ("[" + ((.severity // "SUGGESTION") | ascii_upcase) + "] " + (.message // "")) +
+                (if (.suggestion? and (.suggestion | type) == "string" and (.suggestion | length) > 0)
+                 then "\n\n```suggestion\n" + .suggestion + "\n```"
+                 else "" end)
+              )
+            }]' 2>/dev/null || true)
 
           echo "Model returned $(printf '%s' "$REVIEW_JSON" | jq '.comments | length' 2>/dev/null || echo 'n/a') comment(s); $(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 'n/a') after diff filtering."
           if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
