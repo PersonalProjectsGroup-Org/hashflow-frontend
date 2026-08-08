@@ -61,6 +61,15 @@ jobs:
             mv /tmp/pr.truncated.diff /tmp/pr.diff
           fi
 
+          # Extract (path, new-file line) pairs for lines ADDED in this diff.
+          # Only those lines can receive inline review comments.
+          awk '
+          /^\+\+\+ b\// { path=$0; sub(/^\+\+\+ b\//,"",path); next }
+          /^@@ / { s=$0; sub(/^@@ -[0-9]+(,[0-9]+)? \+/,"",s); sub(/,.*/,"",s); new_line=s+0; next }
+          /^\+/ && !/^\+\+\+/ { print path "\t" new_line; new_line++; next }
+          /^ / { new_line++ }
+          ' /tmp/pr.diff > /tmp/valid_lines.txt || true
+
           RESPONSE=$(curl -sS https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
             -H "Content-Type: application/json" \
@@ -77,25 +86,62 @@ jobs:
                   },
                   {
                     role: "user",
-                    content: ("Review this pull request diff. Structure your reply as:\n1. Summary (2-3 sentences: what the PR does and overall impression)\n2. Issues, each as a bullet: [SEVERITY: ERROR/WARNING/SUGGESTION] file:line — description and suggested fix\nFocus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n\nDiff (truncated to the first part if very large):\n" + $diff)
+                    content: ("Review this pull request diff. Respond with ONLY a JSON object — no markdown fences, no extra text. Shape:\n{\"summary\": \"2-3 sentence overview of what the PR does and your overall impression\", \"comments\": [{\"path\": \"path/to/file.ts\", \"line\": 42, \"severity\": \"ERROR|WARNING|SUGGESTION\", \"message\": \"short description and suggested fix\"}]}\n\nRules:\n- \"path\" must match the diff exactly; \"line\" must be the line number in the NEW version of the file and must be a line added by this PR.\n- Flag only real issues, at most 10 comments. Focus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n- If there are no issues, return {\"summary\": \"...\", \"comments\": []}.\n\nDiff (truncated to the first part if very large):\n" + $diff)
                   }
                 ]
               }')" || true)
 
-          COMMENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
-          if [ -z "$COMMENT" ]; then
-            ERROR=$(printf '%s' "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
-            [ -z "$ERROR" ] && ERROR="OpenRouter request failed (check the Actions log for details)"
-            echo "::warning::OpenRouter review failed: $ERROR"
-            gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: $ERROR" || true
+          REVIEW_JSON=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+
+          # Model reply should be a JSON object: {summary, comments:[{path,line,severity,message}]}
+          SUMMARY=$(printf '%s' "$REVIEW_JSON" | jq -r '.summary // empty' 2>/dev/null || true)
+
+          if [ -z "$SUMMARY" ]; then
+            # Not JSON: post whatever the model said as a plain comment (or the API error).
+            if [ -z "$REVIEW_JSON" ]; then
+              ERROR=$(printf '%s' "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
+              [ -z "$ERROR" ] && ERROR="OpenRouter request failed (check the Actions log for details)"
+              echo "::warning::OpenRouter review failed: $ERROR"
+              gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: $ERROR" || true
+            else
+              BODY=$(cat <<EOF
+          ## 🤖 AI Code Review
+          Model: \`$MODEL\`
+
+          $REVIEW_JSON
+          EOF
+          )
+              gh pr comment "$PR_NUMBER" --body "$BODY" || true
+            fi
             exit 0
+          fi
+
+          # Keep only comments whose (path, line) is actually an added line in
+          # the diff, so the API never rejects the review with a 422.
+          COMMENTS=$(printf '%s' "$REVIEW_JSON" | jq -c --rawfile valid /tmp/valid_lines.txt '
+            [.comments[]? | select(
+              ((.path // "") + "\t" + ((.line // -1) | tostring)) as $k |
+              ($valid | split("\n") | index($k))
+            )]' 2>/dev/null || true)
+
+          if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+            BODY=$(jq -n \
+              --arg commit_id "$(git rev-parse HEAD)" \
+              --arg summary "$SUMMARY" \
+              --argjson comments "$COMMENTS" \
+              '{event: "COMMENT", commit_id: $commit_id, body: $summary, comments: $comments}')
+            if printf '%s' "$BODY" | gh api --method POST "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input - >/dev/null 2>&1; then
+              echo "Posted review with $(printf '%s' "$COMMENTS" | jq 'length') inline comment(s)."
+              exit 0
+            fi
+            echo "::warning::Inline review failed; posting a plain summary comment instead."
           fi
 
           BODY=$(cat <<EOF
           ## 🤖 AI Code Review
           Model: \`$MODEL\`
 
-          $COMMENT
+          $SUMMARY
           EOF
           )
-          gh pr comment "$PR_NUMBER" --body "$BODY"
+          gh pr comment "$PR_NUMBER" --body "$BODY" || true
