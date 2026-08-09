@@ -3,4 +3,8 @@ dist
 package-lock.json
 .claude
 .specify
-specs
+# Generated/source docs (not maintained via Prettier)
+docs/spec.md
+docs/data-model.md
+docs/trello
+docs/checklists
