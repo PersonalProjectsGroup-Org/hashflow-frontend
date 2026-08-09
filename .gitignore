@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Husky generated hook scripts
+.husky/_
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
