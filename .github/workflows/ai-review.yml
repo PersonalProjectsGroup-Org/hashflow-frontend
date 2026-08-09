@@ -214,7 +214,12 @@ jobs:
             exit 0
           fi
 
-          REVIEW_JSON=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+          RAW_CONTENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+          # Some models wrap the JSON in markdown fences despite the prompt. Strip a
+          # leading ```lang line and a trailing ``` line so the review parses and
+          # flows through the added-lines filter + degenerate-output guard instead
+          # of being posted raw to the PR.
+          REVIEW_JSON=$(printf '%s' "$RAW_CONTENT" | sed -E '1{/^```[[:alnum:]]*$/d}; ${/^```$/d}')
 
           # Model reply should be a JSON object: {summary, comments:[{path,line,severity,message}]}
           SUMMARY=$(printf '%s' "$REVIEW_JSON" | jq -r '.summary // empty' 2>/dev/null || true)
