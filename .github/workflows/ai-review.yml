@@ -29,7 +29,9 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # Free-only fallback list: try each pinned free model in order until one
       # answers, with openrouter/free (auto-route) as the last resort.
-      MODELS: google/gemini-2.5-flash:free,deepseek/deepseek-chat-v3:free,qwen/qwen-2.5-72b-instruct:free,openrouter/free
+      # Free models are retired often — refresh the pins with:
+      #   curl -sS https://openrouter.ai/api/v1/models | jq -r '.data[].id' | grep ':free'
+      MODELS: openai/gpt-oss-20b:free,google/gemma-4-31b-it:free,cohere/north-mini-code:free,openrouter/free
       MAX_DIFF_CHARS: 30000
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
 
