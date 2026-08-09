@@ -9,6 +9,8 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # Needed to react (👀) to the /review comment for instant feedback.
+  issues: write
 
 # Cancel a running review if new commits are pushed to the PR. The group is
 # scoped per event type: issue comments (e.g. the Trello card-link comment)
@@ -39,6 +41,19 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
 
     steps:
+      - name: Acknowledge /review (instant feedback)
+        # Give immediate visual feedback that the manual /review trigger was
+        # received: react with 👀 on the comment a few seconds after posting.
+        # (The review check also shows as "pending" in the PR checks section.)
+        if: github.event_name == 'issue_comment' && env.OPENROUTER_API_KEY != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -H "Accept: application/vnd.github.squirrel-girl-preview+json" \
+            -f content=eyes || true
+
       - name: Resolve PR head and base
         env:
           GH_TOKEN: ${{ github.token }}
@@ -214,7 +229,12 @@ jobs:
             exit 0
           fi
 
-          REVIEW_JSON=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+          RAW_CONTENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+          # Some models wrap the JSON in markdown fences despite the prompt. Strip a
+          # leading ```lang line and a trailing ``` line so the review parses and
+          # flows through the added-lines filter + degenerate-output guard instead
+          # of being posted raw to the PR.
+          REVIEW_JSON=$(printf '%s' "$RAW_CONTENT" | sed -E '1{/^```[[:alnum:]]*$/d}; ${/^```$/d}')
 
           # Model reply should be a JSON object: {summary, comments:[{path,line,severity,message}]}
           SUMMARY=$(printf '%s' "$REVIEW_JSON" | jq -r '.summary // empty' 2>/dev/null || true)
