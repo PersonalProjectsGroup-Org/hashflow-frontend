@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@theme {
+  /* Design palette (FR-016/FR-017) — GitHub-dark */
+  --color-success: #3fb950;
+  --color-danger: #f85149;
+  --color-warning: #e3b341;
+  --color-alert: #f0883e;
+  --color-info: #58a6ff;
+
+  --color-background: #0d1117;
+  --color-foreground: #e6edf3;
+  --color-muted: #8b949e;
+  --color-border: #30363d;
+  --color-card: #161b22;
+}
