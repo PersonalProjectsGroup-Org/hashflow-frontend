@@ -183,10 +183,19 @@ jobs:
                 -H "Authorization: Bearer $OPENROUTER_API_KEY" \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" || true)
-              if printf '%s' "$RESPONSE" | jq -e '.choices[0].message.content // empty' >/dev/null 2>&1; then
-                ACTUAL_MODEL="$MODEL"
-                echo "Model $MODEL responded (attempt $attempt)."
-                break 2
+              CONTENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
+              if [ -n "$CONTENT" ]; then
+                # Accept only a well-formed JSON review or a substantial text
+                # reply. Free-tier models occasionally return degenerate
+                # snippets (e.g. "User Safety: safe") — those are not reviews.
+                if printf '%s' "$CONTENT" | jq -e 'type == "object" and (has("summary") or has("comments"))' >/dev/null 2>&1 \
+                   || [ "${#CONTENT}" -ge 40 ]; then
+                  ACTUAL_MODEL="$MODEL"
+                  echo "Model $MODEL responded (attempt $attempt)."
+                  break 2
+                fi
+                echo "::warning::Model $MODEL returned degenerate output (${#CONTENT} chars); trying next model."
+                break
               fi
               echo "::warning::Model $MODEL attempt $attempt/2 failed; retrying in 5s..."
               sleep 5
@@ -208,15 +217,21 @@ jobs:
           SUMMARY=$(printf '%s' "$REVIEW_JSON" | jq -r '.summary // empty' 2>/dev/null || true)
 
           if [ -z "$SUMMARY" ]; then
-            # Not JSON: post whatever the model said as a plain comment.
-            BODY=$(cat <<EOF
+            # Model output did not parse as the expected JSON shape. Post it as
+            # a plain comment only if it is substantial; skip degenerate output.
+            if printf '%s' "$REVIEW_JSON" | jq -e 'type == "object"' >/dev/null 2>&1 \
+               || [ "${#REVIEW_JSON}" -ge 40 ]; then
+              BODY=$(cat <<EOF
           ## 🤖 AI Code Review
           Model: \`$ACTUAL_MODEL\`
 
           $REVIEW_JSON
           EOF
           )
-            gh pr comment "$PR_NUMBER" --body "$BODY" || true
+              gh pr comment "$PR_NUMBER" --body "$BODY" || true
+            else
+              echo "::warning::Model returned degenerate output; skipping review post: $(printf '%s' "$REVIEW_JSON" | head -c 120)"
+            fi
             exit 0
           fi
 
