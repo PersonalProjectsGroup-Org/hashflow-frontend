@@ -10,9 +10,12 @@ permissions:
   contents: read
   pull-requests: write
 
-# Cancel a running review if new commits are pushed to the PR.
+# Cancel a running review if new commits are pushed to the PR. The group is
+# scoped per event type: issue comments (e.g. the Trello card-link comment)
+# spawn runs that skip, and without this suffix they would cancel the real
+# pull_request review in progress.
 concurrency:
-  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: ai-review-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
