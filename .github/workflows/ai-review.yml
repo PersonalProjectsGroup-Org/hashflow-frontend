@@ -27,16 +27,21 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body || '', '/review'))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Must exceed 2 attempts x 4 models x 240s worst case (~32 min) so the
+    # failure path (comment + exit 0) always runs instead of being killed.
+    timeout-minutes: 40
     # Reviews are informational: never turn the PR red if the API hiccups.
     continue-on-error: true
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      # Free-only fallback list: try each pinned free model in order until one
-      # answers, with openrouter/free (auto-route) as the last resort.
-      # Free models are retired often — refresh the pins with:
+      # Free-only fallback list. openrouter/free (auto-route) is FIRST: it is the
+      # only model that reliably answers on the free tier (observed 8/10 runs;
+      # the pinned models time out at 90s almost every time, so routing through
+      # the router first keeps reviews fast). The pins stay as quality fallbacks
+      # when the router itself is down. Free models are retired often — refresh
+      # the pins with:
       #   curl -sS https://openrouter.ai/api/v1/models | jq -r '.data[].id' | grep ':free'
-      MODELS: openai/gpt-oss-20b:free,google/gemma-4-31b-it:free,cohere/north-mini-code:free,openrouter/free
+      MODELS: openrouter/free,openai/gpt-oss-20b:free,google/gemma-4-31b-it:free,cohere/north-mini-code:free
       MAX_DIFF_CHARS: 30000
       PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
 
@@ -170,10 +175,12 @@ jobs:
           /^ / { new_line++ }
           ' /tmp/pr.diff > /tmp/valid_lines.txt || true
 
-          # Try the pinned free models in order (fallback list), building the
-          # payload per model. Stops at the first model that returns content.
+          # Try the free models in order (fallback list), building the payload
+          # per model. Stops at the first model that returns content.
           ACTUAL_MODEL=""
           RESPONSE=""
+          CURL_RC=0
+          HTTP_CODE=""
           for MODEL in $(printf '%s' "$MODELS" | tr ',' ' '); do
             echo "Trying model: $MODEL"
             PAYLOAD=$(jq -n \
@@ -197,10 +204,21 @@ jobs:
                 }')
 
             for attempt in 1 2; do
-              RESPONSE=$(curl -sS --max-time 90 https://openrouter.ai/api/v1/chat/completions \
+              # Free tier routinely takes 60-90s to first token under queue load
+              # and >90s when saturated (the 3x failure on PR #19 was exactly
+              # that: every attempt hit the old 90s cap). 240s keeps the review
+              # alive through queue spikes. Capture the HTTP status (-w) and
+              # curl exit code separately so a failure is diagnosable: exit 28 =
+              # timeout (HTTP_CODE 000), 429/5xx = OpenRouter rejecting.
+              CURL_RC=0
+              RESP_FILE=$(mktemp)
+              HTTP_CODE=$(curl -sS --max-time 240 -o "$RESP_FILE" -w '%{http_code}' \
+                https://openrouter.ai/api/v1/chat/completions \
                 -H "Authorization: Bearer $OPENROUTER_API_KEY" \
                 -H "Content-Type: application/json" \
-                -d "$PAYLOAD" || true)
+                -d "$PAYLOAD") || CURL_RC=$?
+              RESPONSE=$(cat "$RESP_FILE" 2>/dev/null || true)
+              rm -f "$RESP_FILE"
               CONTENT=$(printf '%s' "$RESPONSE" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
               if [ -n "$CONTENT" ]; then
                 # Accept only a well-formed JSON review or a substantial text
@@ -215,16 +233,16 @@ jobs:
                 echo "::warning::Model $MODEL returned degenerate output (${#CONTENT} chars); trying next model."
                 break
               fi
-              echo "::warning::Model $MODEL attempt $attempt/2 failed; retrying in 5s..."
+              echo "::warning::Model $MODEL attempt $attempt/2 failed (curl exit $CURL_RC, HTTP $HTTP_CODE); retrying in 5s..."
               sleep 5
             done
           done
 
           if [ -z "$ACTUAL_MODEL" ]; then
             ERROR=$(printf '%s' "$RESPONSE" | jq -r '.error.message // empty' 2>/dev/null || true)
-            [ -z "$ERROR" ] && ERROR="All models in the fallback list failed (check the Actions log for details)"
+            [ -z "$ERROR" ] && ERROR="All models in the fallback list failed (last attempt: curl exit $CURL_RC, HTTP $HTTP_CODE)"
             echo "::warning::OpenRouter review failed: $ERROR"
-            echo "::debug::OpenRouter response: $(printf '%s' "$RESPONSE" | head -c 500)"
+            echo "::warning::Last response body: $(printf '%s' "$RESPONSE" | head -c 500)"
             gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: $ERROR" || true
             exit 0
           fi
