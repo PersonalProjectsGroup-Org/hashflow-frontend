@@ -181,6 +181,12 @@ jobs:
           RESPONSE=""
           CURL_RC=0
           HTTP_CODE=""
+          # Consecutive *instant* failures (degenerate replies or HTTP 429)
+          # mean the free-tier pool is saturated: the remaining models will
+          # stall for minutes each (observed: 17 min of foregone 240s
+          # timeouts on PR #19). After 3, abort with a clear message instead
+          # of grinding the whole fallback loop.
+          INSTANT_FAILS=0
           for MODEL in $(printf '%s' "$MODELS" | tr ',' ' '); do
             echo "Trying model: $MODEL"
             PAYLOAD=$(jq -n \
@@ -230,8 +236,29 @@ jobs:
                   echo "Model $MODEL responded (attempt $attempt)."
                   break 2
                 fi
-                echo "::warning::Model $MODEL returned degenerate output (${#CONTENT} chars); trying next model."
-                break
+                # Degenerate snippet — not a review. Retrying this model is
+                # cheap (~2s), so give it attempt 2 before moving on, and count
+                # it as an instant failure toward the saturation abort.
+                INSTANT_FAILS=$((INSTANT_FAILS + 1))
+                echo "::warning::Model $MODEL returned degenerate output (${#CONTENT} chars) — instant fail $INSTANT_FAILS/3; retrying..."
+                if [ "$INSTANT_FAILS" -ge 3 ]; then
+                  echo "::warning::Free-tier pool saturated ($INSTANT_FAILS consecutive instant failures); aborting fallback loop."
+                  gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: OpenRouter free-tier pool is saturated right now (degenerate responses from every model). Retry the review in a few hours, or rely on the quality gate — it is green unless the check says otherwise." || true
+                  exit 0
+                fi
+                sleep 2
+                continue
+              fi
+              if [ "$HTTP_CODE" = "429" ]; then
+                INSTANT_FAILS=$((INSTANT_FAILS + 1))
+                echo "::warning::Model $MODEL HTTP 429 (rate limit/quota) — instant fail $INSTANT_FAILS/3; retrying..."
+                if [ "$INSTANT_FAILS" -ge 3 ]; then
+                  echo "::warning::Free-tier quota/rate limit exhausted ($INSTANT_FAILS consecutive instant failures); aborting fallback loop."
+                  gh pr comment "$PR_NUMBER" --body "🤖 AI review failed: OpenRouter free-tier rate limit/quota is exhausted right now (HTTP 429 responses). Retry the review in a few hours, or rely on the quality gate — it is green unless the check says otherwise." || true
+                  exit 0
+                fi
+                sleep 5
+                continue
               fi
               echo "::warning::Model $MODEL attempt $attempt/2 failed (curl exit $CURL_RC, HTTP $HTTP_CODE); retrying in 5s..."
               sleep 5
