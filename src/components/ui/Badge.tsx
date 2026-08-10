@@ -43,7 +43,7 @@ export function Badge({
 }: ComponentProps<'span'> & { tone?: BadgeTone }) {
   return (
     <span
-      className={`${baseClass} ${toneClass[tone]}${className ? ` ${className}` : ''}`}
+      className={`${baseClass} ${toneClass[tone] ?? toneClass.neutral}${className ? ` ${className}` : ''}`}
       {...props}
     />
   );
