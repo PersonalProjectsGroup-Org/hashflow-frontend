@@ -88,8 +88,12 @@ export function Tabs({
           <button
             key={item.id}
             ref={(node) => {
+              // React 19 calls the ref callback with null on unmount, so the
+              // Map never keeps references to removed tabs (items can change).
               if (node) {
                 tabRefs.current.set(item.id, node);
+              } else {
+                tabRefs.current.delete(item.id);
               }
             }}
             id={`tab-${item.id}`}
