@@ -8,6 +8,13 @@
 - `trello-cards.md` — the full manifest of all 63 cards, with batch order,
   list assignments, labels, and estimates.
 
+> 💡 **Context lines on cards are agent-facing traceability** — they point at
+> the governing source (`tasks.md` phase, `plan.md` §section, spec `FR-###` /
+> `RN##` / `SC-###` IDs, `data-model.md` entities/endpoints) so an agent
+> implementing or reviewing the card can cross-check it against the spec
+> without hunting. They are not for end users; preserve them when editing
+> cards.
+
 ## How to create the next batch
 
 1. Open `trello-cards.md`.
