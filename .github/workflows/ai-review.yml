@@ -175,6 +175,20 @@ jobs:
           /^ / { new_line++ }
           ' /tmp/pr.diff > /tmp/valid_lines.txt || true
 
+          # Prior review threads on this PR (for dedupe + "do not repeat" context).
+          # A fresh model run has no memory; without this, re-reviews re-raise the
+          # exact points already raised and answered on the PR.
+          PRIOR_SUMMARY="none"
+          PRIOR_FILE=$(mktemp)
+          if gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" --paginate > /tmp/prior_raw.json 2>/dev/null; then
+            jq -r '.[] | [(.path // ""), (.line // 0), ((.body // "") | split("\n")[0] | split("] ") | .[1:] | join("] "))] | @tsv' /tmp/prior_raw.json > "$PRIOR_FILE" 2>/dev/null || true
+            PRIOR_SUMMARY=$(awk -F'\t' 'NF>=3 {print $1":"$2" — "substr($3,1,160)}' "$PRIOR_FILE" | head -8)
+            [ -z "$PRIOR_SUMMARY" ] && PRIOR_SUMMARY="none"
+            echo "Prior review threads: $(wc -l < "$PRIOR_FILE")"
+          else
+            echo "No prior review threads."
+          fi
+
           # Try the free models in order (fallback list), building the payload
           # per model. Stops at the first model that returns content.
           ACTUAL_MODEL=""
@@ -193,6 +207,7 @@ jobs:
                 --arg model "$MODEL" \
                 --arg repo_facts "$REPO_FACTS" \
                 --arg gates "$GATES" \
+                --arg prior "$PRIOR_SUMMARY" \
                 --rawfile diff /tmp/pr.diff \
                 '{
                   model: $model,
@@ -204,7 +219,7 @@ jobs:
                     },
                     {
                       role: "user",
-                      content: ("Review this pull request diff. Respond with ONLY a JSON object — no markdown fences, no extra text. Shape:\n{\"summary\": \"2-3 sentence overview of what the PR does and your overall impression\", \"comments\": [{\"path\": \"path/to/file.ts\", \"line\": 42, \"severity\": \"ERROR|WARNING|SUGGESTION\", \"message\": \"short description and suggested fix\", \"suggestion\": \"optional replacement code for that one line\"}]}\n\nRules:\n- \"path\" must match the diff exactly; \"line\" must be the line number in the NEW version of the file and must be a line added by this PR.\n- \"suggestion\" is optional: for issues with a clear mechanical fix, include the full replacement for the flagged line only, with the same indentation as the original line. Never wrap it in markdown fences.\n- Flag only real issues, at most 5 comments. Focus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n- NEVER suggest code that is already present in the file or diff.\n- NEVER assert a fact you cannot verify from the provided files. If unsure about a library version, config, or ecosystem convention, phrase it as a question or omit it.\n- package-lock.json is excluded from this diff; do not comment on dependency version numbers.\n- Prefer returning an empty comments array over inventing issues.\n- If there are no issues, return {\"summary\": \"...\", \"comments\": []}.\n\nDiff (truncated to the first part if very large):\n" + $diff)
+                      content: ("Review this pull request diff. Respond with ONLY a JSON object — no markdown fences, no extra text. Shape:\n{\"summary\": \"2-3 sentence overview of what the PR does and your overall impression\", \"comments\": [{\"path\": \"path/to/file.ts\", \"line\": 42, \"severity\": \"ERROR|WARNING|SUGGESTION\", \"message\": \"short description and suggested fix\", \"evidence\": \"the exact flagged line copied verbatim from the diff\", \"suggestion\": \"optional replacement code for that one line\"}]}\n\nRules:\n- \"path\" must match the diff exactly; \"line\" must be the line number in the NEW version of the file and must be a line added by this PR.\n- \"evidence\" is REQUIRED on every comment: copy the flagged line verbatim from the diff. If you cannot quote the exact line, do not write the comment.\n- \"suggestion\" is optional: for issues with a clear mechanical fix, include the full replacement for the flagged line only, with the same indentation as the original line. Never wrap it in markdown fences. Never suggest code that is already present in the file — check the flagged line first.\n- Flag only real issues, at most 5 comments. Focus on bugs, logic errors, missing error handling, security problems (hardcoded secrets, unsafe patterns), and React/TypeScript pitfalls.\n- NEVER claim that an API, function, or property does not exist or is not valid: you cannot inspect the project dependencies, so you cannot prove absence. If unsure, omit the comment.\n- NEVER assert a fact you cannot verify from the provided files. If unsure about a library version, config, or ecosystem convention, phrase it as a question or omit it.\n- Do not comment on context lines that this PR does not add.\n- package-lock.json is excluded from this diff; do not comment on dependency version numbers.\n- Prefer returning an empty comments array over inventing issues.\n- If there are no issues, return {\"summary\": \"...\", \"comments\": []}.\n\nExamples of comments you must NOT write — real false positives caught on this project:\n- \"rerender is not a function\" — rerender IS part of the @testing-library/react render() return value; it exists and is typed.\n- \"Add an explicit type for the props parameter\" — when the parameter is already annotated; check the line before commenting.\n- \"tabIndex must be a string\" — React types tabIndex as a number; the type-check gate passing on this exact commit proves the code compiles.\n- \"Add aria-labelledby on the tablist\" — when the element already has an accessible name via aria-label; aria-labelledby must reference an element ID, never a label string.\n- \"Missing dependency in useEffect\" — when the diff adds no useEffect; do not claim a bug in code that is not there.\n\nAlready-raised review points on this PR (do NOT repeat them):\n" + $prior + "\n\nDiff (truncated to the first part if very large):\n" + $diff)
                     }
                   ]
                 }')
@@ -303,38 +318,216 @@ jobs:
             exit 0
           fi
 
-          # Keep only comments whose (path, line) is actually an added line in
-          # the diff, so the API never rejects the review with a 422.
-          COMMENTS=$(printf '%s' "$REVIEW_JSON" | jq -c --rawfile valid /tmp/valid_lines.txt '
-            [.comments[]? | select(
-              ((.path // "") + "\t" + ((.line // -1) | tostring)) as $k |
-              ($valid | split("\n") | index($k))
-            ) | {
-              path: .path,
-              line: .line,
-              body: (
-                ("[" + ((.severity // "SUGGESTION") | ascii_upcase) + "] " + (.message // "")) +
-                (if (.suggestion? and (.suggestion | type) == "string" and (.suggestion | length) > 0)
-                 then "\n\n```suggestion\n" + .suggestion + "\n```"
-                 else "" end)
-              )
-            }]' 2>/dev/null || true)
+          # ---------- anti-hallucination filters ----------
+          # The position of each comment is validated (path+line must be a line
+          # added by this PR) AND its content is grounded in the diff: evidence
+          # must match the real line, suggestions must not duplicate existing
+          # code, "does not exist" claims are checked against the repo, and
+          # prior review threads are not repeated. Free models hallucinate
+          # despite prompt rules — these gates are the enforcement.
+          printf '%s' "$REVIEW_JSON" > /tmp/review.json
+          cat > /tmp/filter-review.mjs <<'NODE'
+          import fs from 'node:fs';
 
-          echo "Model returned $(printf '%s' "$REVIEW_JSON" | jq '.comments | length' 2>/dev/null || echo 'n/a') comment(s); $(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 'n/a') after diff filtering."
-          if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -eq 0 ]; then
-            echo "Model output (first 400 chars):"
-            printf '%s' "$REVIEW_JSON" | head -c 400
-            echo ""
+          const DIFF = '/tmp/pr.diff';
+          const REVIEW = '/tmp/review.json';
+          const PRIOR = '/tmp/prior.txt';
+
+          // ---------- parse the diff: added lines -> (path, line, content) ----------
+          const added = new Map();      // "path\tline" -> content of the added line
+          const fileAdded = new Map();  // path -> all added content, joined
+          let path = '';
+          let newLine = 0;
+          for (const raw of fs.readFileSync(DIFF, 'utf8').split('\n')) {
+            const pm = raw.match(/^\+\+\+ b\/(.*)$/);
+            if (pm) { path = pm[1]; continue; }
+            const hm = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+            if (hm) { newLine = Number(hm[2]); continue; }
+            if (raw.startsWith('+') && !raw.startsWith('+++')) {
+              const content = raw.slice(1);
+              added.set(path + '\t' + newLine, content);
+              fileAdded.set(path, (fileAdded.get(path) ?? '') + '\n' + content);
+              newLine += 1;
+            } else if (raw.startsWith(' ') && !raw.startsWith('@@')) {
+              newLine += 1;
+            }
+          }
+
+          // ---------- text similarity helpers ----------
+          const norm = (s) => String(s ?? '').trim().replace(/\s+/g, ' ');
+          const lower = (s) => norm(s).toLowerCase();
+          const toks = (s) => lower(s).split(/[^a-z0-9_]+/).filter((t) => t.length > 1);
+          const jaccard = (a, b) => {
+            const A = new Set(a), B = new Set(b);
+            let inter = 0;
+            for (const t of A) if (B.has(t)) inter += 1;
+            const union = A.size + B.size - inter;
+            return union === 0 ? 0 : inter / union;
+          };
+          const evidenceMatches = (evidence, content) => {
+            const e = lower(evidence), c = lower(content);
+            if (!e || !c) return false;
+            if (e.length >= 12 && (c.includes(e) || e.includes(c))) return true;
+            return jaccard(toks(e), toks(c)) >= 0.5;
+          };
+
+          // ---------- identifier existence check against the repo ----------
+          const SCAN_DIRS = ['src'];
+          for (const d of ['@testing-library', 'react', 'react-dom', '@types', 'recharts', 'zustand', 'vitest', '@tanstack']) {
+            const p = 'node_modules/' + d;
+            if (fs.existsSync(p)) SCAN_DIRS.push(p);
+          }
+          const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          function tokenExistsInRepo(token) {
+            if (!/^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)*$/.test(token)) return false;
+            const re = new RegExp('\\b' + escRe(token) + '\\b');
+            for (const dir of SCAN_DIRS) {
+              if (!fs.existsSync(dir)) continue;
+              const stack = [dir];
+              while (stack.length) {
+                const cur = stack.pop();
+                let entries;
+                try { entries = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+                for (const en of entries) {
+                  if (en.name.startsWith('.') || en.name.endsWith('.map')) continue;
+                  const full = cur + '/' + en.name;
+                  if (en.isDirectory()) { stack.push(full); continue; }
+                  if (!/\.(mjs|js|ts|tsx|d\.ts)$/.test(en.name)) continue;
+                  let head = '';
+                  try { head = fs.readFileSync(full, 'utf8').slice(0, 262144); } catch { continue; }
+                  if (re.test(head)) return true;
+                }
+              }
+            }
+            return false;
+          }
+
+          const NEGATION = /(does not exist|doesn't exist|is not a (function|method|property|valid|supported|standard)|is not defined|isn't (a |an )?valid|not a (function|method|property))/i;
+          const EFFECT_CLAIM = /useEffect|useMemo|useCallback/i;
+          const RACE_CLAIM = /(dependenc|deps|race|cleanup|unmount)/i;
+          const PREVENT_CLAIM = /prevent[\s_-]*default|stop[\s_-]*propagation/i;
+          const ARIA_MISSING = /(missing|add|needs).*aria|aria.*(missing|absent)/i;
+
+          // ---------- prior review threads (dedupe) ----------
+          const prior = [];
+          if (fs.existsSync(PRIOR)) {
+            for (const line of fs.readFileSync(PRIOR, 'utf8').split('\n')) {
+              const parts = line.split('\t');
+              if (parts.length >= 2 && parts[0]) {
+                prior.push({ path: parts[0], line: Number(parts[1]), body: parts[2] ?? '' });
+              }
+            }
+          }
+
+          // ---------- load the model review ----------
+          let review;
+          try {
+            review = JSON.parse(fs.readFileSync(REVIEW, 'utf8'));
+          } catch (e) {
+            console.error('unparseable review JSON: ' + e.message);
+            process.exit(2);
+          }
+          const comments = Array.isArray(review.comments) ? review.comments : [];
+          const summary = String(review.summary ?? '');
+
+          // ---------- filter each comment ----------
+          const inline = [];
+          const suggestions = [];
+          const dropped = [];
+          const seen = new Set();
+          const drop = (c, reason) => dropped.push({ reason, path: c.path, line: c.line, message: c.message });
+
+          for (const c of comments) {
+            const path = String(c.path ?? '');
+            const line = Number(c.line ?? -1);
+            const message = String(c.message ?? '');
+            const evidence = String(c.evidence ?? '');
+            const suggestion = typeof c.suggestion === 'string' ? c.suggestion : '';
+            const severity = String(c.severity ?? 'SUGGESTION').toUpperCase();
+
+            const key = path + '\t' + line;
+            const content = added.get(key);
+            if (!content) { drop({ path, line, message }, 'position: ' + key + ' is not an added line'); continue; }
+
+            const dkey = path + '|' + line + '|' + lower(message).slice(0, 120);
+            if (seen.has(dkey)) { drop({ path, line, message }, 'duplicate within this review'); continue; }
+            seen.add(dkey);
+
+            const priorHit = prior.some((p) =>
+              (p.path === path && p.line === line) ||
+              (p.body && jaccard(toks(p.body), toks(message)) >= 0.8));
+            if (priorHit) { drop({ path, line, message }, 'already raised in a prior review thread'); continue; }
+
+            if (!evidence) { drop({ path, line, message }, 'missing evidence (every comment must quote the flagged line verbatim)'); continue; }
+            if (!evidenceMatches(evidence, content)) { drop({ path, line, message }, 'evidence does not match the flagged line'); continue; }
+
+            if (suggestion) {
+              const fileContent = norm(fileAdded.get(path) ?? '');
+              const sn = norm(suggestion);
+              if (sn.length >= 12 && (fileContent.includes(sn) || sn.includes(fileContent))) { drop({ path, line, message }, 'suggestion is already present in the file'); continue; }
+              if (jaccard(toks(sn), toks(content)) >= 0.65) { drop({ path, line, message }, 'suggestion duplicates the existing line'); continue; }
+            }
+
+            const msgToks = [...new Set([
+              ...[...message.matchAll(/`([^`]+)`/g)].map((m) => m[1]),
+              ...[...message.matchAll(/\b[A-Za-z_$][\w$]*\.[A-Za-z_$][\w$.]*\b/g)].map((m) => m[0]),
+              ...[...message.matchAll(/\b[A-Z][a-zA-Z0-9]{2,}\b/g)].map((m) => m[0]),
+            ])];
+            if (NEGATION.test(message) && msgToks.some(tokenExistsInRepo)) { drop({ path, line, message }, 'identifier-existence gate: named API exists in the repo or installed packages'); continue; }
+
+            const fileLower = lower(fileAdded.get(path) ?? '');
+            if (RACE_CLAIM.test(message) && EFFECT_CLAIM.test(message) && !EFFECT_CLAIM.test(fileLower)) { drop({ path, line, message }, 'claims a useEffect/useMemo/useCallback issue but the diff adds none'); continue; }
+            if (PREVENT_CLAIM.test(message) && !PREVENT_CLAIM.test(lower(content))) { drop({ path, line, message }, 'claims preventDefault/stopPropagation behavior the flagged line does not have'); continue; }
+            if (ARIA_MISSING.test(message) && lower(content).includes('aria-label=')) { drop({ path, line, message }, 'claims a missing aria attribute but the element already has an accessible name (aria-label)'); continue; }
+
+            const body = '[' + severity + '] ' + message + (suggestion ? '\n\n```suggestion\n' + suggestion + '\n```' : '');
+            if (severity === 'WARNING' || severity === 'ERROR') inline.push({ path, line, body });
+            else suggestions.push({ path, line, severity, message, suggestion });
+          }
+
+          process.stdout.write(JSON.stringify({
+            summary,
+            inline,
+            suggestions,
+            dropped: dropped.length,
+            dropReasons: dropped.slice(0, 8).map((d) => d.reason + ' — ' + d.path + ':' + d.line),
+          }));
+          NODE
+          if ! node /tmp/filter-review.mjs > /tmp/filtered.json 2>/tmp/filter.err; then
+            echo "::warning::Review filter failed; posting summary only: $(head -c 200 /tmp/filter.err)"          BODY=$(cat <<EOF
+          ## 🤖 AI Code Review
+          Model: \`$ACTUAL_MODEL\`
+
+          $SUMMARY_BODY
+          EOF
+          )
+          gh pr comment "$PR_NUMBER" --body "$BODY" || true
+            exit 0
           fi
 
-          if [ "$(printf '%s' "$COMMENTS" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+          TOTAL=$(printf '%s' "$REVIEW_JSON" | jq '.comments | length' 2>/dev/null || echo 0)
+          INLINE_COUNT=$(jq -r '.inline | length' /tmp/filtered.json)
+          SUGG_COUNT=$(jq -r '.suggestions | length' /tmp/filtered.json)
+          DROPPED=$(jq -r '.dropped // 0' /tmp/filtered.json)
+          echo "Model returned $TOTAL comment(s): $INLINE_COUNT inline, $SUGG_COUNT suggestions, $DROPPED filtered."
+          if [ "${DROPPED:-0}" -gt 0 ]; then
+            echo "Filtered: $(jq -r '.dropReasons | join("; ")' /tmp/filtered.json)"
+          fi
+
+          SUMMARY_BODY=$(jq -n \
+            --arg s "$SUMMARY" \
+            --argjson sugg "$(jq -c '.suggestions' /tmp/filtered.json)" \
+            --argjson dropped "$(jq -r '.dropped // 0' /tmp/filtered.json)" \
+            '($s + (if ($sugg | length) > 0 then "\n\n**Suggestions (not blocking):**\n" + ([$sugg[] | ("- `" + .path + ":" + ((.line // 0) | tostring) + "` " + (.message // ""))] | join("\n")) else "" end) + (if $dropped > 0 then "\n\n_" + ($dropped | tostring) + " comment(s) filtered by automated anti-hallucination checks (position, evidence match, duplicates, API existence)._ " else "" end))')
+
+          if [ "$INLINE_COUNT" -gt 0 ]; then
             BODY=$(jq -n \
               --arg commit_id "$(git rev-parse HEAD)" \
-              --arg summary "$SUMMARY" \
-              --argjson comments "$COMMENTS" \
+              --arg summary "$SUMMARY_BODY" \
+              --argjson comments "$(jq -c '.inline' /tmp/filtered.json)" \
               '{event: "COMMENT", commit_id: $commit_id, body: $summary, comments: $comments}')
             if printf '%s' "$BODY" | gh api --method POST "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --input - >/dev/null 2>&1; then
-              echo "Posted review with $(printf '%s' "$COMMENTS" | jq 'length') inline comment(s)."
+              echo "Posted review with $INLINE_COUNT inline comment(s)."
               exit 0
             fi
             echo "::warning::Inline review failed; posting a plain summary comment instead."
