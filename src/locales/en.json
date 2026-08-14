@@ -1,0 +1,55 @@
+{
+  "header": {
+    "live": "Live",
+    "rigsCount": "Rigs: {online}/{total}",
+    "profitDay": "Profit/day",
+    "switchCount": "{n} switch suggestions",
+    "editKwh": "Click to edit kWh",
+    "telemetryTicker": "Telemetry every 10s · Prices every 30s"
+  },
+  "section": {
+    "rigSupervision": "Rig Supervision",
+    "profitabilityTable": "Profitability Analysis (RN04)"
+  },
+  "status": {
+    "online": "Online",
+    "throttling": "Throttling",
+    "offline": "Offline"
+  },
+  "rigCard": {
+    "hashrate": "Hashrate",
+    "temperature": "Temperature",
+    "power": "Consumption",
+    "profitDay": "Profit/day",
+    "uptime": "Uptime: {value}",
+    "turnOff": "Turn off rig",
+    "turnOn": "Turn on rig"
+  },
+  "table": {
+    "rig": "Rig",
+    "coin": "Coin",
+    "revenue": "Revenue",
+    "energyCost": "Energy Cost",
+    "netProfit": "Net Profit"
+  },
+  "panel": {
+    "market": "Market"
+  },
+  "tab": {
+    "alerts": "Alerts",
+    "suggestions": "Suggestions",
+    "news": "News"
+  },
+  "alerts": {
+    "noAlerts": "No alerts"
+  },
+  "time": {
+    "minutesAgo": "{n}m ago",
+    "hoursAgo": "{n}h ago"
+  },
+  "impact": {
+    "low": "LOW",
+    "medium": "MEDIUM",
+    "high": "HIGH"
+  }
+}
