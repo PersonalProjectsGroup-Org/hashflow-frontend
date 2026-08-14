@@ -1,0 +1,55 @@
+{
+  "header": {
+    "live": "Ao vivo",
+    "rigsCount": "Rigs: {online}/{total}",
+    "profitDay": "Lucro/dia",
+    "switchCount": "{n} sugestões de troca",
+    "editKwh": "Clique para editar kWh",
+    "telemetryTicker": "Telemetria a cada 10s · Preços a cada 30s"
+  },
+  "section": {
+    "rigSupervision": "Supervisão de Rigs",
+    "profitabilityTable": "Análise de Lucratividade (RN04)"
+  },
+  "status": {
+    "online": "Online",
+    "throttling": "Throttling",
+    "offline": "Offline"
+  },
+  "rigCard": {
+    "hashrate": "Hashrate",
+    "temperature": "Temperatura",
+    "power": "Consumo",
+    "profitDay": "Lucro/dia",
+    "uptime": "Uptime: {value}",
+    "turnOff": "Desligar rig",
+    "turnOn": "Ligar rig"
+  },
+  "table": {
+    "rig": "Rig",
+    "coin": "Moeda",
+    "revenue": "Faturamento",
+    "energyCost": "Custo Energia",
+    "netProfit": "Lucro Líquido"
+  },
+  "panel": {
+    "market": "Mercado"
+  },
+  "tab": {
+    "alerts": "Alertas",
+    "suggestions": "Sugestões",
+    "news": "Notícias"
+  },
+  "alerts": {
+    "noAlerts": "Nenhum alerta"
+  },
+  "time": {
+    "minutesAgo": "{n}m atrás",
+    "hoursAgo": "{n}h atrás"
+  },
+  "impact": {
+    "low": "BAIXO",
+    "medium": "MÉDIO",
+    "high": "ALTO"
+  }
+}
