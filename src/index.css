@@ -1,16 +1,65 @@
 @import 'tailwindcss';
 
-@theme {
-  /* Design palette (FR-016/FR-017) — GitHub-dark */
-  --color-success: #3fb950;
-  --color-danger: #f85149;
-  --color-warning: #e3b341;
-  --color-alert: #f0883e;
-  --color-info: #58a6ff;
+/*
+ * Design tokens (FR-016/FR-017) — GitHub-dark.
+ *
+ * Two layers:
+ *   1. Raw palette variables. `:root` carries the calm set (default);
+ *      `[data-palette='alert']` carries the alert red/amber set, prepared
+ *      for T056 (US6 adaptive UX) and refined there.
+ *   2. Semantic tokens in `@theme inline` reference the palette variables,
+ *      so every utility (bg-card, text-info, border-border, ...) re-themes
+ *      globally when the palette swaps — no component changes needed.
+ *
+ * Swap mechanism (wired in T056): set `data-palette="alert"` on an ancestor
+ * (e.g. <html> or the app root) while a HIGH-impact event is active; remove
+ * it to restore the calm scheme. Semantic status colors (success/danger/
+ * warning/alert) are intentionally unchanged in the alert set so status
+ * semantics stay readable per FR-004.
+ */
 
-  --color-background: #0d1117;
-  --color-foreground: #e6edf3;
-  --color-muted: #8b949e;
-  --color-border: #30363d;
-  --color-card: #161b22;
+@theme inline {
+  --color-success: var(--palette-success);
+  --color-danger: var(--palette-danger);
+  --color-warning: var(--palette-warning);
+  --color-alert: var(--palette-alert);
+  --color-info: var(--palette-info);
+
+  --color-background: var(--palette-background);
+  --color-foreground: var(--palette-foreground);
+  --color-muted: var(--palette-muted);
+  --color-border: var(--palette-border);
+  --color-card: var(--palette-card);
+}
+
+/* Calm palette (default) — GitHub-dark */
+:root {
+  --palette-success: #3fb950;
+  --palette-danger: #f85149;
+  --palette-warning: #e3b341;
+  --palette-alert: #f0883e;
+  --palette-info: #58a6ff;
+
+  --palette-background: #0d1117;
+  --palette-foreground: #e6edf3;
+  --palette-muted: #8b949e;
+  --palette-border: #30363d;
+  --palette-card: #161b22;
+}
+
+/* Alert palette — red/amber tones for HIGH-impact events (prepared for T056) */
+[data-palette='alert'] {
+  /* Status colors unchanged: online/throttling/offline must stay readable (FR-004) */
+  --palette-success: #3fb950;
+  --palette-danger: #f85149;
+  --palette-warning: #e3b341;
+  --palette-alert: #f0883e;
+  /* Accent shifts blue → amber */
+  --palette-info: #e3b341;
+
+  --palette-background: #1a0f10;
+  --palette-foreground: #f0e6e6;
+  --palette-muted: #9c8b8b;
+  --palette-border: #5a2e2c;
+  --palette-card: #231516;
 }
